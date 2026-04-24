@@ -83,6 +83,7 @@ class SessionSource:
     user_id_alt: Optional[str] = None  # Signal UUID (alternative to phone number)
     chat_id_alt: Optional[str] = None  # Signal group internal ID
     is_bot: bool = False  # True when the message author is a bot/webhook (Discord)
+    route_tag: Optional[str] = None  # Optional virtual-profile route tag (e.g. "ram", "rem")
     
     @property
     def description(self) -> str:
@@ -115,6 +116,7 @@ class SessionSource:
             "user_name": self.user_name,
             "thread_id": self.thread_id,
             "chat_topic": self.chat_topic,
+            "route_tag": self.route_tag,
         }
         if self.user_id_alt:
             d["user_id_alt"] = self.user_id_alt
@@ -135,6 +137,7 @@ class SessionSource:
             chat_topic=data.get("chat_topic"),
             user_id_alt=data.get("user_id_alt"),
             chat_id_alt=data.get("chat_id_alt"),
+            route_tag=data.get("route_tag"),
         )
     
 
@@ -496,17 +499,20 @@ def build_session_key(
       - Without identifiers, messages fall back to one session per platform/chat_type.
     """
     platform = source.platform.value
+    route_prefix = "agent:main"
+    if source.route_tag:
+        route_prefix = f"agent:profile:{source.route_tag}"
     if source.chat_type == "dm":
         if source.chat_id:
             if source.thread_id:
-                return f"agent:main:{platform}:dm:{source.chat_id}:{source.thread_id}"
-            return f"agent:main:{platform}:dm:{source.chat_id}"
+                return f"{route_prefix}:{platform}:dm:{source.chat_id}:{source.thread_id}"
+            return f"{route_prefix}:{platform}:dm:{source.chat_id}"
         if source.thread_id:
-            return f"agent:main:{platform}:dm:{source.thread_id}"
-        return f"agent:main:{platform}:dm"
+            return f"{route_prefix}:{platform}:dm:{source.thread_id}"
+        return f"{route_prefix}:{platform}:dm"
 
     participant_id = source.user_id_alt or source.user_id
-    key_parts = ["agent:main", platform, source.chat_type]
+    key_parts = [route_prefix, platform, source.chat_type]
 
     if source.chat_id:
         key_parts.append(source.chat_id)

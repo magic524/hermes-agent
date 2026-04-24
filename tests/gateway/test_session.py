@@ -62,6 +62,17 @@ class TestSessionSourceRoundtrip:
         assert restored.chat_id == "cli"
         assert restored.chat_type == "dm"  # default value preserved
 
+    def test_route_tag_roundtrip(self):
+        source = SessionSource(
+            platform=Platform.WEIXIN,
+            chat_id="wx-chat",
+            chat_type="dm",
+            route_tag="rem",
+        )
+        d = source.to_dict()
+        restored = SessionSource.from_dict(d)
+        assert restored.route_tag == "rem"
+
     def test_chat_id_coerced_to_string(self):
         """from_dict should handle numeric chat_id (common from Telegram)."""
         restored = SessionSource.from_dict({
@@ -118,6 +129,27 @@ class TestSessionSourceDescription:
         )
         assert "group" in source.description
         assert "Dev Chat" in source.description
+
+
+class TestSessionKeyRouting:
+    def test_dm_route_tag_changes_session_namespace(self):
+        source = SessionSource(
+            platform=Platform.WEIXIN,
+            chat_id="wx-chat",
+            chat_type="dm",
+            route_tag="rem",
+        )
+
+        assert build_session_key(source) == "agent:profile:rem:weixin:dm:wx-chat"
+
+    def test_default_route_keeps_main_session_namespace(self):
+        source = SessionSource(
+            platform=Platform.WEIXIN,
+            chat_id="wx-chat",
+            chat_type="dm",
+        )
+
+        assert build_session_key(source) == "agent:main:weixin:dm:wx-chat"
 
     def test_channel_type(self):
         source = SessionSource(

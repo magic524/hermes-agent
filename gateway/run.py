@@ -281,6 +281,11 @@ from gateway.session import (
     build_session_key,
 )
 from gateway.delivery import DeliveryRouter
+from gateway.profile_routing import (
+    ChatProfileRouter,
+    list_available_profile_names,
+    profile_dir_from_name,
+)
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -485,13 +490,13 @@ def _platform_config_key(platform: "Platform") -> str:
 def _load_gateway_config() -> dict:
     """Load and parse ~/.hermes/config.yaml, returning {} on any error."""
     try:
-        config_path = _hermes_home / 'config.yaml'
+        config_path = get_hermes_home() / 'config.yaml'
         if config_path.exists():
             import yaml
             with open(config_path, 'r', encoding='utf-8') as f:
                 return yaml.safe_load(f) or {}
     except Exception:
-        logger.debug("Could not load gateway config from %s", _hermes_home / 'config.yaml')
+        logger.debug("Could not load gateway config from %s", get_hermes_home() / 'config.yaml')
     return {}
 
 
@@ -629,6 +634,7 @@ class GatewayRunner:
         self._restart_drain_timeout = self._load_restart_drain_timeout()
         self._provider_routing = self._load_provider_routing()
         self._fallback_model = self._load_fallback_model()
+        self._profile_router = ChatProfileRouter(_hermes_home)
 
         # Wire process registry into session store for reset protection
         from tools.process_registry import process_registry
@@ -769,8 +775,6 @@ class GatewayRunner:
             "This is fine if the model already emits host-visible paths, but MEDIA file delivery can fail "
             "for container-local paths like '/workspace/...' or '/output/...'."
         )
-
-
 
     # -- Setup skill availability ----------------------------------------
 
@@ -3050,6 +3054,7 @@ class GatewayRunner:
         7. Return response
         """
         source = event.source
+        source.route_tag = self._profile_router.get_routed_profile_name(source)
 
         # Internal events (e.g. background-process completion notifications)
         # are system-generated and must skip user authorization.
@@ -3906,11 +3911,16 @@ class GatewayRunner:
         _msg_start_time = time.time()
         _platform_name = source.platform.value if hasattr(source.platform, "value") else str(source.platform)
         _msg_preview = (event.text or "")[:80].replace("\n", " ")
+        _routed_profile = source.route_tag or self._profile_router.gateway_profile_name
+        _profile_ctx = self._profile_router.runtime_context(_routed_profile)
+        _profile_home = _profile_ctx.__enter__()
+        _session_env_tokens = []
         logger.info(
-            "inbound message: platform=%s user=%s chat=%s msg=%r",
+            "inbound message: platform=%s user=%s chat=%s profile=%s msg=%r",
             _platform_name, source.user_name or source.user_id or "unknown",
-            source.chat_id or "unknown", _msg_preview,
+            source.chat_id or "unknown", _routed_profile, _msg_preview,
         )
+        _route_config_path = _profile_home / "config.yaml"
 
         # Get or create session
         session_entry = self.session_store.get_or_create_session(source)
@@ -3939,7 +3949,7 @@ class GatewayRunner:
         _redact_pii = False
         try:
             import yaml as _pii_yaml
-            with open(_config_path, encoding="utf-8") as _pf:
+            with open(_route_config_path, encoding="utf-8") as _pf:
                 _pcfg = _pii_yaml.safe_load(_pf) or {}
             _redact_pii = bool((_pcfg.get("privacy") or {}).get("redact_pii", False))
         except Exception:
@@ -4089,7 +4099,7 @@ class GatewayRunner:
             _hyg_api_key = None
             _hyg_data = {}
             try:
-                _hyg_cfg_path = _hermes_home / "config.yaml"
+                _hyg_cfg_path = _route_config_path
                 if _hyg_cfg_path.exists():
                     import yaml as _hyg_yaml
                     with open(_hyg_cfg_path, encoding="utf-8") as _hyg_f:
@@ -4741,7 +4751,9 @@ class GatewayRunner:
             )
         finally:
             # Restore session context variables to their pre-handler state
-            self._clear_session_env(_session_env_tokens)
+            if _session_env_tokens:
+                self._clear_session_env(_session_env_tokens)
+            _profile_ctx.__exit__(None, None, None)
     
     def _format_session_info(self) -> str:
         """Resolve current model config and return a formatted info block.
@@ -4930,16 +4942,50 @@ class GatewayRunner:
         return f"{header}{_tip_line}"
     
     async def _handle_profile_command(self, event: MessageEvent) -> str:
-        """Handle /profile — show active profile name and home directory."""
+        """Handle /profile — show or switch the routed profile for this chat."""
         from hermes_constants import display_hermes_home
         from hermes_cli.profiles import get_active_profile_name
 
+        args = event.get_command_args().strip()
+        source = event.source
+        routed = self._profile_router.get_routed_profile_name(source)
+
+        if args:
+            wanted = args.split()[0].strip().lower()
+            if wanted in {"clear", "reset", "default", "main", "host"}:
+                self._profile_router.set_routed_profile_name(source, self._profile_router.gateway_profile_name)
+                source.route_tag = self._profile_router.gateway_profile_name
+                return (
+                    f"✓ This chat now routes to the gateway profile: "
+                    f"`{self._profile_router.gateway_profile_name}`"
+                )
+
+            try:
+                target_dir = profile_dir_from_name(wanted)
+            except Exception as exc:
+                available = ", ".join(f"`{name}`" for name in list_available_profile_names())
+                return (
+                    f"✗ Unknown profile `{wanted}`: {exc}\n\n"
+                    f"Available profiles: {available}"
+                )
+
+            self._profile_router.set_routed_profile_name(source, wanted)
+            source.route_tag = wanted
+            return (
+                f"✓ This chat now routes to profile `{wanted}`\n"
+                f"📂 **Home:** `{target_dir}`"
+            )
+
         display = display_hermes_home()
         profile_name = get_active_profile_name()
+        routed_display = routed or self._profile_router.gateway_profile_name
 
         lines = [
-            f"👤 **Profile:** `{profile_name}`",
-            f"📂 **Home:** `{display}`",
+            f"👤 **Gateway profile:** `{profile_name}`",
+            f"🧭 **This chat routes to:** `{routed_display}`",
+            f"📂 **Gateway home:** `{display}`",
+            "",
+            "Use `/profile ram`, `/profile rem`, or `/profile default` to switch this chat.",
         ]
 
         return "\n".join(lines)
