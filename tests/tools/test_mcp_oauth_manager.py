@@ -7,6 +7,7 @@ cache. See `tools/mcp_oauth_manager.py` for design rationale.
 import json
 import os
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -139,3 +140,25 @@ def test_manager_builds_hermes_provider_subclass(tmp_path, monkeypatch):
     assert isinstance(provider, _HERMES_PROVIDER_CLS)
     assert provider._hermes_server_name == "srv"
 
+
+@pytest.mark.asyncio
+async def test_provider_accepts_exact_endpoint_resource_match(tmp_path, monkeypatch):
+    """Hosted MCP servers may advertise the full endpoint as the resource.
+
+    Notion MCP returns ``https://mcp.notion.com/mcp`` as the protected
+    resource, while the upstream SDK's default expectation is the origin-only
+    base resource. Hermes should accept the exact configured endpoint too.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from tools.mcp_oauth_manager import MCPOAuthManager, reset_manager_for_tests
+
+    reset_manager_for_tests()
+    mgr = MCPOAuthManager()
+    provider = mgr.get_or_build_provider(
+        "notion", "https://mcp.notion.com/mcp", None,
+    )
+
+    prm = SimpleNamespace(resource="https://mcp.notion.com/mcp")
+
+    await provider._validate_resource_match(prm)

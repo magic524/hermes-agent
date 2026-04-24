@@ -38,6 +38,7 @@ import asyncio
 import logging
 import threading
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,72 @@ def _make_hermes_provider_class() -> Optional[type]:
     except ImportError:  # pragma: no cover — SDK required in CI
         return None
 
+    if not getattr(OAuthClientProvider, "_hermes_resource_match_patched", False):
+        _sdk_validate_resource_match = OAuthClientProvider._validate_resource_match
+
+        async def _hermes_validate_resource_match(self, prm) -> None:
+            """Accept exact endpoint resources in addition to SDK base matching.
+
+            Some hosted MCP providers advertise the protected resource as the
+            full MCP endpoint URL (for example ``https://mcp.notion.com/mcp``).
+            Older Hermes code paths and some SDK-derived defaults compare
+            against the origin-only base URL instead, causing a false mismatch
+            before OAuth can even begin.
+            """
+            prm_resource = str(getattr(prm, "resource", "") or "").rstrip("/")
+            configured_endpoint = str(getattr(getattr(self, "context", None), "server_url", "") or "").rstrip("/")
+
+            if prm_resource and configured_endpoint:
+                if prm_resource == configured_endpoint:
+                    logger.warning(
+                        "MCP OAuth debug: exact resource match accepted prm=%s endpoint=%s",
+                        prm_resource, configured_endpoint,
+                    )
+                    return
+                try:
+                    prm_parts = urlsplit(prm_resource)
+                    endpoint_parts = urlsplit(configured_endpoint)
+                except Exception:
+                    prm_parts = endpoint_parts = None
+
+                if (
+                    prm_parts
+                    and endpoint_parts
+                    and prm_parts.scheme == endpoint_parts.scheme
+                    and prm_parts.netloc == endpoint_parts.netloc
+                ):
+                    prm_path = prm_parts.path.rstrip("/")
+                    endpoint_path = endpoint_parts.path.rstrip("/")
+
+                    # Exact endpoint match.
+                    if prm_path == endpoint_path:
+                        logger.warning(
+                            "MCP OAuth debug: path-equal resource match accepted prm=%s endpoint=%s",
+                            prm_resource, configured_endpoint,
+                        )
+                        return
+
+                    # Hosted MCP providers sometimes advertise the full MCP
+                    # endpoint (e.g. /mcp) while the client was initialized
+                    # with the origin-only base URL. Accept that narrower
+                    # resource too — same host, more specific path.
+                    if endpoint_path == "" and prm_path:
+                        logger.warning(
+                            "MCP OAuth debug: base-to-path resource match accepted prm=%s endpoint=%s",
+                            prm_resource, configured_endpoint,
+                        )
+                        return
+
+            logger.warning(
+                "MCP OAuth debug: falling back to SDK resource validator prm=%s endpoint=%s",
+                prm_resource, configured_endpoint,
+            )
+
+            await _sdk_validate_resource_match(self, prm)
+
+        OAuthClientProvider._validate_resource_match = _hermes_validate_resource_match
+        OAuthClientProvider._hermes_resource_match_patched = True
+
     class HermesMCPOAuthProvider(OAuthClientProvider):
         """OAuthClientProvider with pre-flow disk-mtime reload.
 
@@ -110,6 +177,68 @@ def _make_hermes_provider_class() -> Optional[type]:
         def __init__(self, *args: Any, server_name: str = "", **kwargs: Any):
             super().__init__(*args, **kwargs)
             self._hermes_server_name = server_name
+
+        async def _validate_resource_match(self, prm) -> None:
+            """Accept both base-resource and exact endpoint-resource matches.
+
+            Some hosted MCP providers, notably Notion MCP, advertise the
+            protected resource as the full MCP endpoint URL
+            (``https://host.tld/mcp``) while the MCP SDK derives the expected
+            default resource from the server URL's origin
+            (``https://host.tld``). The SDK then raises
+            ``Protected resource ... does not match expected ...`` before the
+            browser OAuth flow can begin.
+
+            Hermes treats an exact match against the configured MCP endpoint as
+            valid in addition to the SDK's default base-resource match. This is
+            still tight scoping: we only accept the precise server URL the user
+            configured, not arbitrary sibling paths.
+            """
+            prm_resource = str(getattr(prm, "resource", "") or "").rstrip("/")
+            if not prm_resource:
+                return
+
+            configured_endpoint = str(getattr(self.context, "server_url", "") or "").rstrip("/")
+            if prm_resource == configured_endpoint:
+                logger.warning(
+                    "MCP OAuth debug: subclass exact resource match accepted prm=%s endpoint=%s",
+                    prm_resource, configured_endpoint,
+                )
+                return
+
+            try:
+                prm_parts = urlsplit(prm_resource)
+                endpoint_parts = urlsplit(configured_endpoint)
+            except Exception:
+                prm_parts = endpoint_parts = None
+
+            if (
+                prm_parts
+                and endpoint_parts
+                and prm_parts.scheme == endpoint_parts.scheme
+                and prm_parts.netloc == endpoint_parts.netloc
+            ):
+                prm_path = prm_parts.path.rstrip("/")
+                endpoint_path = endpoint_parts.path.rstrip("/")
+                if prm_path == endpoint_path:
+                    logger.warning(
+                        "MCP OAuth debug: subclass path-equal match accepted prm=%s endpoint=%s",
+                        prm_resource, configured_endpoint,
+                    )
+                    return
+                if endpoint_path == "" and prm_path:
+                    logger.warning(
+                        "MCP OAuth debug: subclass base-to-path match accepted prm=%s endpoint=%s",
+                        prm_resource, configured_endpoint,
+                    )
+                    return
+
+            logger.warning(
+                "MCP OAuth debug: subclass falling back prm=%s endpoint=%s",
+                prm_resource, configured_endpoint,
+            )
+
+            await super()._validate_resource_match(prm)
 
         async def _initialize(self) -> None:
             """Load stored tokens + client info AND seed token_expiry_time.
@@ -362,7 +491,6 @@ class MCPOAuthManager:
             _configure_callback_port,
             _is_interactive,
             _maybe_preregister_client,
-            _parse_base_url,
             _redirect_handler,
             _wait_for_callback,
         )
@@ -387,7 +515,7 @@ class MCPOAuthManager:
 
         return _HERMES_PROVIDER_CLS(
             server_name=server_name,
-            server_url=_parse_base_url(entry.server_url),
+            server_url=str(entry.server_url).rstrip("/"),
             client_metadata=client_metadata,
             storage=storage,
             redirect_handler=_redirect_handler,

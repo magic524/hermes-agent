@@ -1008,6 +1008,15 @@ class MCPServerTask:
                 _oauth_auth = get_manager().get_or_build_provider(
                     self.name, url, config.get("oauth"),
                 )
+                if _oauth_auth is not None:
+                    _ctx = getattr(_oauth_auth, "context", None)
+                    logger.warning(
+                        "MCP OAuth debug '%s': provider=%s server_url=%s validate_impl=%s",
+                        self.name,
+                        type(_oauth_auth).__qualname__,
+                        getattr(_ctx, "server_url", None),
+                        getattr(type(_oauth_auth)._validate_resource_match, "__qualname__", None),
+                    )
             except Exception as exc:
                 logger.warning("MCP OAuth setup failed for '%s': %s", self.name, exc)
                 raise
