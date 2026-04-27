@@ -4979,13 +4979,17 @@ class GatewayRunner:
         display = display_hermes_home()
         profile_name = get_active_profile_name()
         routed_display = routed or self._profile_router.gateway_profile_name
+        available_profiles = list_available_profile_names()
+        switch_targets = [f"`/profile {name}`" for name in available_profiles]
+        switch_targets.append("`/profile default`")
+        switch_hint = ", ".join(switch_targets)
 
         lines = [
             f"👤 **Gateway profile:** `{profile_name}`",
             f"🧭 **This chat routes to:** `{routed_display}`",
             f"📂 **Gateway home:** `{display}`",
             "",
-            "Use `/profile ram`, `/profile rem`, or `/profile default` to switch this chat.",
+            f"Use {switch_hint} to switch this chat.",
         ]
 
         return "\n".join(lines)
