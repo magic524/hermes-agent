@@ -164,6 +164,20 @@ class TestAggregatorProviders:
         assert result == "anthropic/claude-sonnet-4.6"
 
 
+class TestDeepSeekNativeNormalization:
+    @pytest.mark.parametrize("model,expected", [
+        ("deepseek-v4-pro", "deepseek-v4-pro"),
+        ("deepseek-v4-flash", "deepseek-v4-flash"),
+        ("deepseek/deepseek-v4-pro", "deepseek-v4-pro"),
+        ("pro", "deepseek-v4-pro"),
+        ("flash", "deepseek-v4-flash"),
+        ("deepseek-v4", "deepseek-v4-pro"),
+        ("deepseek-r1", "deepseek-reasoner"),
+    ])
+    def test_deepseek_preserves_v4_and_maps_shorthand(self, model, expected):
+        assert normalize_model_for_provider(model, "deepseek") == expected
+
+
 class TestIssue6211NativeProviderPrefixNormalization:
     @pytest.mark.parametrize("model,target_provider,expected", [
         ("zai/glm-5.1", "zai", "glm-5.1"),
